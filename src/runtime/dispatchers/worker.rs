@@ -25,11 +25,13 @@
 //!
 //! # Cancellation Flow
 //!
-//! When an orchestration reaches a terminal state while an activity is running:
-//! 1. The activity manager detects the terminal state during lock renewal
+//! When an activity's lock renewal fails (including orchestration cancellation):
+//! 1. The activity manager observes the renewal error
 //! 2. It signals the activity's cancellation token
 //! 3. The worker dispatcher waits up to the grace period for the activity to complete
-//! 4. If the activity doesn't complete, it's aborted and the work item is dropped
+//! 4. If the activity doesn't complete, it's aborted and joined
+//! 5. Any work still owned by this token is abandoned for redelivery; a renewal
+//!    error alone does not establish that the orchestration was cancelled
 
 use crate::providers::WorkItem;
 use std::sync::Arc;
@@ -569,7 +571,7 @@ async fn run_activity_with_cancellation(
                 worker_id = %ctx.worker_id,
                 activity_tag = ?ctx.tag,
                 grace_ms = %grace.as_millis(),
-                "Orchestration terminated, waiting for activity grace period"
+                "Activity lock renewal failed, waiting for activity grace period"
             );
 
             // Wait for activity to finish within grace period, or abort it
@@ -586,18 +588,25 @@ async fn run_activity_with_cancellation(
                 let _ = activity_handle.await;
             }
 
-            // Record metrics and ack (drop result since orchestration is terminal)
+            // A failed renewal may be a transient provider error while the
+            // orchestration and lease are still live. Do not ack without a
+            // completion: that would leave the orchestration waiting forever.
+            // The handler has finished or been aborted and joined, so release
+            // any surviving work for redelivery. A token invalidated by real
+            // cancellation or another worker cannot restore or release its row.
             let duration_seconds = start_time.elapsed().as_secs_f64();
             rt.record_activity_execution(&ctx.activity_name, "cancelled", duration_seconds, 0, ctx.tag.as_deref());
 
-            let result = rt.history_store.ack_work_item(&ctx.lock_token, None).await;
+            let result = rt.history_store
+                .abandon_work_item(&ctx.lock_token, Some(Duration::from_millis(100)), false)
+                .await;
             if let Err(e) = &result {
                 tracing::warn!(
                     target: "duroxide::runtime",
                     instance = %ctx.instance,
                     activity_id = %ctx.activity_id,
                     error = %e,
-                    "Failed to ack cancelled activity work item"
+                    "Failed to abandon activity work item after renewal failure"
                 );
             }
             (result, ActivityOutcome::Cancelled)
