@@ -368,10 +368,12 @@ impl Runtime {
         };
 
         let mut worker_handles = Vec::with_capacity(concurrency);
+        let gate = super::PollGate::new(self.options.single_idle_poller);
 
         for worker_idx in 0..concurrency {
             let rt = Arc::clone(&self);
             let cancel = cancel.clone();
+            let gate = gate.clone();
             let cap_filter = Some(capability_filter.clone());
             let supported_range = runtime_supported_range.clone();
             // Generate unique worker ID: orch-{index}-{runtime_id}
@@ -384,6 +386,12 @@ impl Runtime {
                         // debug!("Orchestration worker {} exiting", worker_id);
                         break;
                     }
+
+                    // Held through this iteration's idle sleep or error backoff;
+                    // released before processing found work (see PollGate).
+                    let Some(turn) = gate.enter(&cancel).await else {
+                        break;
+                    };
 
                     let min_interval = rt.options.dispatcher_min_poll_interval;
                     let poll_timeout = rt.options.dispatcher_long_poll_timeout;
@@ -406,6 +414,8 @@ impl Runtime {
 
                     match fetched {
                         Ok(Some((item, lock_token, attempt_count))) => {
+                            // Let the next task poll while this one works.
+                            drop(turn);
                             // Reset error counter on success
                             consecutive_retryable_errors = 0;
 
