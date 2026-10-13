@@ -347,6 +347,23 @@ pub struct RuntimeOptions {
     ///
     /// Default: `TagFilter::DefaultOnly` (untagged activities only)
     pub worker_tag_filter: crate::providers::TagFilter,
+
+    /// Let at most one idle task per dispatcher poll the provider.
+    ///
+    /// By default every orchestration and worker task polls on its own, so an
+    /// idle runtime issues `(orchestration_concurrency + worker_concurrency) /
+    /// dispatcher_min_poll_interval` fetches a second, in step. With this set,
+    /// one idle task per dispatcher polls; a task that finds work hands the
+    /// turn to the next at once, so concurrency under load is unchanged and
+    /// an idle runtime issues two fetches per `dispatcher_min_poll_interval`.
+    /// Worth it for short-polling providers (SQLite, PostgreSQL) with high
+    /// concurrency.
+    ///
+    /// Any slot may then pick up any session's work, so all worker slots
+    /// share one session owner: `worker_node_id` if set, else the runtime id.
+    ///
+    /// Default: false
+    pub single_idle_poller: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -372,6 +389,7 @@ impl Default for RuntimeOptions {
             max_sessions_per_runtime: 10,
             worker_node_id: None,
             worker_tag_filter: crate::providers::TagFilter::default(),
+            single_idle_poller: false,
         }
     }
 }
