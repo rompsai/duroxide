@@ -593,6 +593,9 @@ pub struct FailingProvider {
     allow_failure_commits: AtomicBool,
     /// If true, do the actual ack before returning error (for testing post-ack failures)
     ack_then_fail: AtomicBool,
+    /// Fetches made, for counting polls
+    orchestration_fetches: std::sync::atomic::AtomicUsize,
+    work_fetches: std::sync::atomic::AtomicUsize,
 }
 
 impl FailingProvider {
@@ -605,7 +608,19 @@ impl FailingProvider {
             fail_next_fetch_work_item: AtomicBool::new(false),
             allow_failure_commits: AtomicBool::new(false),
             ack_then_fail: AtomicBool::new(false),
+            orchestration_fetches: Default::default(),
+            work_fetches: Default::default(),
         }
+    }
+
+    /// Orchestration fetches made so far.
+    pub fn orchestration_fetches(&self) -> usize {
+        self.orchestration_fetches.load(Ordering::SeqCst)
+    }
+
+    /// Work item fetches made so far.
+    pub fn work_fetches(&self) -> usize {
+        self.work_fetches.load(Ordering::SeqCst)
     }
 
     pub fn fail_next_ack_work_item(&self) {
@@ -645,6 +660,7 @@ impl Provider for FailingProvider {
         poll_timeout: Duration,
         filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
+        self.orchestration_fetches.fetch_add(1, Ordering::SeqCst);
         if self.fail_next_fetch_orchestration_item.swap(false, Ordering::SeqCst) {
             Err(ProviderError::retryable(
                 "fetch_orchestration_item",
@@ -664,6 +680,7 @@ impl Provider for FailingProvider {
         session: Option<&SessionFetchConfig>,
         tag_filter: &TagFilter,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+        self.work_fetches.fetch_add(1, Ordering::SeqCst);
         if self.fail_next_fetch_work_item.swap(false, Ordering::SeqCst) {
             Err(ProviderError::retryable(
                 "fetch_work_item",

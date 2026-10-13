@@ -191,13 +191,21 @@ impl Runtime {
         // With a stable worker_node_id all slots share the same session
         // owner so any idle slot can serve any owned session.
         // Without one, each slot gets an ephemeral identity.
-        let stable_node_id = self.options.worker_node_id.clone();
+        // With one idle poller, whichever slot polls must be able to claim
+        // any session, so all slots share an identity (see RuntimeOptions).
+        let stable_node_id = self
+            .options
+            .worker_node_id
+            .clone()
+            .or_else(|| self.options.single_idle_poller.then(|| self.runtime_id.clone()));
+        let gate = super::PollGate::new(self.options.single_idle_poller);
 
         for worker_idx in 0..concurrency {
             let rt = Arc::clone(&self);
             let activities = Arc::clone(&activities);
             let cancel = cancel.clone();
             let session_tracker_clone = Arc::clone(&session_tracker);
+            let gate = gate.clone();
 
             let suffix = stable_node_id.as_deref().unwrap_or(&self.runtime_id);
             let worker_id = format!("work-{worker_idx}-{suffix}");
@@ -216,6 +224,12 @@ impl Runtime {
                         break;
                     }
 
+                    // Held through this iteration's idle sleep or error backoff;
+                    // released once an item is fetched (see PollGate).
+                    let Some(mut turn) = gate.enter(&cancel).await.map(Some) else {
+                        break;
+                    };
+
                     let min_interval = rt.options.dispatcher_min_poll_interval;
                     let start_time = std::time::Instant::now();
 
@@ -226,6 +240,7 @@ impl Runtime {
                         &worker_id,
                         &session_owner,
                         &session_tracker_clone,
+                        &mut turn,
                     )
                     .await
                     {
@@ -293,6 +308,7 @@ async fn process_next_work_item(
     worker_id: &str,
     session_worker_id: &str,
     session_tracker: &Arc<SessionTracker>,
+    turn: &mut Option<super::PollTurn>,
 ) -> Result<bool, crate::providers::ProviderError> {
     // Check session capacity: if at limit, only fetch non-session items
     let at_session_capacity = session_tracker.distinct_count() >= rt.options.max_sessions_per_runtime;
@@ -325,6 +341,8 @@ async fn process_next_work_item(
         Some(result) => result,
         None => return Ok(false),
     };
+    // Let the next slot poll while this one works.
+    drop(turn.take());
 
     let item_serialized = serde_json::to_string(&item).unwrap_or_default();
 
