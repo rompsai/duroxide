@@ -5,7 +5,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Secret scan of this PR's own commits (seconds). The daily 04:00 SGT run scans full history.
-base="${FLOW_BASE:-$(git merge-base origin/main HEAD)}"
+# No main here: the fallback (local runs) is the default branch, origin/HEAD.
+base="${FLOW_BASE:-$(git merge-base origin/HEAD HEAD)}"
 gitleaks git . --redact --no-banner --exit-code 1 --log-opts="${base}..HEAD"
 
 # Compile, as today's PR job does (no tests).
