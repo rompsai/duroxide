@@ -1,0 +1,46 @@
+name: check
+on:
+  pull_request:
+concurrency:
+  group: check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  check:
+    name: check
+    # Today's only job runs on GitHub's ubuntu-latest (no fleet class), so no
+    # Fleet S2 probe either; the lead can point CHECK_RUNNER elsewhere.
+    runs-on: ${{ fromJSON(vars.CHECK_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256_X64: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      GITLEAKS_SHA256_ARM64: e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install gitleaks
+        working-directory: ${{ runner.temp }}
+        run: |
+          case "$(uname -m)" in
+            x86_64) kind=x64; sum=$GITLEAKS_SHA256_X64 ;;
+            aarch64) kind=arm64; sum=$GITLEAKS_SHA256_ARM64 ;;
+            *) echo "::error::no gitleaks asset for $(uname -m)"; exit 1 ;;
+          esac
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_${kind}.tar.gz"
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${sum}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" gitleaks
+          echo "${{ runner.temp }}" >> "$GITHUB_PATH"
+      # Rust comes from rust-toolchain.toml on first cargo call, as today.
+      - run: ci/check
+        env:
+          FLOW_BASE: ${{ github.event.pull_request.base.sha }}

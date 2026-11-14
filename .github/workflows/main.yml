@@ -1,0 +1,49 @@
+name: main
+on:
+  push:
+    # This repo has no main branch: its default branch is the trunk.
+    branches: [romps/0.1.32-renewal]
+concurrency:
+  group: main-loop
+  cancel-in-progress: false
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  test:
+    name: test
+    # Today's runner, as check.yml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: ci/test
+        env:
+          FLOW_BASE: ""
+  build:
+    name: build
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.build.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Rust comes from rust-toolchain.toml on first cargo call, as today.
+      - id: build
+        run: |
+          ci/build | tee build.out
+          a=$(tail -n 1 build.out | sed -n 's/^artifact=//p')
+          [ -n "$a" ] || { echo "ci/build printed no artifact= line" >&2; exit 1; }
+          echo "artifact=$a" >> "$GITHUB_OUTPUT"
+        env:
+          FLOW_COMMIT: ${{ github.sha }}
