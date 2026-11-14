@@ -4,7 +4,7 @@ on:
     # This repo has no main branch: its default branch is the trunk.
     branches: [romps/0.1.32-renewal]
 concurrency:
-  group: main-loop
+  group: main-loop-${{ github.ref }}
   cancel-in-progress: false
 permissions:
   contents: read
