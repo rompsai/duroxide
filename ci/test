@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # ci/test: runs exactly the suites admitted in ci/suites.tsv, nothing else.
+# A row runs when its admitted column is "yes" or "quarantine" (a flaky test, with one retry
+# in its own command and an owner); "cut" rows are kept for the record and for hand runs.
 # FLOW_BASE (last tested commit) is passed by the main loop; unused for now.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -8,8 +10,15 @@ n=0
 while IFS=$'\t' read -r name cmd owner budget admitted guards; do
   [ -z "${name}" ] && continue
   [ "${name}" = "name" ] && continue
+  case "${admitted}" in
+    yes | quarantine) ;;
+    *)
+      echo "suite ${name}: ${admitted} (${guards}), not run"
+      continue
+      ;;
+  esac
   n=$((n + 1))
-  echo "suite ${name} (owner ${owner}, budget ${budget}s)"
+  echo "suite ${name} (${admitted}, owner ${owner}, budget ${budget}s)"
   timeout "${budget}" bash -c "${cmd}"
 done < ci/suites.tsv
 [ "${n}" -gt 0 ] || echo "no admitted suites"

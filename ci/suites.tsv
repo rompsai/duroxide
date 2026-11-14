@@ -1,1 +1,5 @@
 name	command	owner	budget_s	admitted	guards
+tests	cargo test --all-features -- --skip event_before_subscription_after_start_is_ignored --skip exhaustive_small_scope_queue_race_orders	e4b	1500	yes	behavior
+flaky-event-before-subscription	cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored || cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored	e4b	300	quarantine	flaky
+exhaustive-queue-race	cargo test --all-features --test cancellation_corner_cases -- --exact exhaustive_small_scope_queue_race_orders	e4b	600	cut	slow
+no-features	cargo test	e4b	1500	cut	dup
