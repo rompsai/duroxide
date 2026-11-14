@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ci/deploy: one of the five flow scripts (check, test, build, deploy, smoke).
+# Library with no publish step today (.github/workflows/CI.yml has none).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "ci/deploy: nothing to do yet"
