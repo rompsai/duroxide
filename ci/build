@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ci/build: one of the five flow scripts (check, test, build, deploy, smoke).
+# Wraps today's commands; source: .github/workflows/CI.yml:21 (cargo build --all-features).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+cargo build --all-features
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+echo "artifact=duroxide@${version}"

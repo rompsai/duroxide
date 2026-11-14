@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ci/smoke: one of the five flow scripts (check, test, build, deploy, smoke).
+# Library with no deployed service to smoke today (.github/workflows/CI.yml has none).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "ci/smoke: nothing to do yet"
