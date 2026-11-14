@@ -264,3 +264,5 @@ This project may contain trademarks or logos for projects, products, or services
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+PRs need only the check job; tests run on main after merge (TARGET-FLOW-CONTRACT).
