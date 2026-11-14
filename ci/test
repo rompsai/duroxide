@@ -19,6 +19,6 @@ while IFS=$'\t' read -r name cmd owner budget admitted guards; do
   esac
   n=$((n + 1))
   echo "suite ${name} (${admitted}, owner ${owner}, budget ${budget}s)"
-  timeout "${budget}" bash -c "${cmd}"
+  timeout "${budget}" bash -c "${cmd}" </dev/null
 done < ci/suites.tsv
 [ "${n}" -gt 0 ] || echo "no admitted suites"
