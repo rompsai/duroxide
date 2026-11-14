@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ci/quarantine-test <test binary> <test name>: runs one quarantined (flaky) test with one
+# retry. It first checks that exactly one test has that name, so a renamed or deleted test
+# fails here instead of passing with zero tests run.
+set -euo pipefail
+bin="$1"
+name="$2"
+found=$(cargo test --all-features --test "${bin}" -- --exact "${name}" --list 2>/dev/null | grep -c ': test$' || true)
+if [ "${found}" != 1 ]; then
+  echo "quarantine: ${bin}::${name} matches ${found} tests, not 1 (renamed or deleted? fix ci/suites.tsv)" >&2
+  exit 1
+fi
+cargo test --all-features --test "${bin}" -- --exact "${name}" \
+  || cargo test --all-features --test "${bin}" -- --exact "${name}"
