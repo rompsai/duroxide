@@ -2,11 +2,14 @@
 # ci/test: runs exactly the suites admitted in ci/suites.tsv, nothing else.
 # A row runs when its admitted column is "yes" or "quarantine" (a flaky test, with one retry
 # in its own command and an owner); "cut" rows are kept for the record and for hand runs.
+# A failing suite is recorded and the next suite still runs: every suite runs, and ci/test
+# fails at the end, naming every failed suite.
 # FLOW_BASE (last tested commit) is passed by the main loop; unused for now.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 n=0
+failed=()
 while IFS=$'\t' read -r name cmd owner budget admitted guards; do
   [ -z "${name}" ] && continue
   [ "${name}" = "name" ] && continue
@@ -19,6 +22,13 @@ while IFS=$'\t' read -r name cmd owner budget admitted guards; do
   esac
   n=$((n + 1))
   echo "suite ${name} (${admitted}, owner ${owner}, budget ${budget}s)"
-  timeout "${budget}" bash -c "${cmd}" </dev/null
+  if ! timeout "${budget}" bash -c "${cmd}" </dev/null; then
+    echo "suite ${name}: FAILED (owner ${owner})"
+    failed+=("${name}")
+  fi
 done < ci/suites.tsv
 [ "${n}" -gt 0 ] || echo "no admitted suites"
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo "FAILED ${#failed[@]} of ${n} suites: ${failed[*]}"
+  exit 1
+fi
