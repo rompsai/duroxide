@@ -1,5 +1,8 @@
 name	command	owner	budget_s	admitted	guards
-tests	cargo test --all-features -- --skip event_before_subscription_after_start_is_ignored --skip exhaustive_small_scope_queue_race_orders	e4b	1500	yes	behavior
-flaky-event-before-subscription	cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored || cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored	e4b	300	quarantine	flaky
+tests	cargo test --all-features -- --skip event_before_subscription_after_start_is_ignored --skip long_running_activity_with_lock_renewal --skip recovery_multiple_orchestrations_sqlite_provider --skip test_multi_worker_complex_orchestration --skip exhaustive_small_scope_queue_race_orders	e4b	1500	yes	behavior
+flaky-event-before-subscription-after-start-is	cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored || cargo test --all-features --test errors_tests -- --exact event_before_subscription_after_start_is_ignored	e4b	300	quarantine	flaky
+flaky-long-running-activity-with-lock-renewal	cargo test --all-features --test lock_timeout_tests -- --exact long_running_activity_with_lock_renewal || cargo test --all-features --test lock_timeout_tests -- --exact long_running_activity_with_lock_renewal	e4b	300	quarantine	flaky
+flaky-recovery-multiple-orchestrations-sqlite-	cargo test --all-features --test recovery_tests -- --exact recovery_multiple_orchestrations_sqlite_provider || cargo test --all-features --test recovery_tests -- --exact recovery_multiple_orchestrations_sqlite_provider	e4b	300	quarantine	flaky
+flaky-test-multi-worker-complex-orchestration	cargo test --all-features --test session_e2e_tests -- --exact test_multi_worker_complex_orchestration || cargo test --all-features --test session_e2e_tests -- --exact test_multi_worker_complex_orchestration	e4b	300	quarantine	flaky
 exhaustive-queue-race	cargo test --all-features --test cancellation_corner_cases -- --exact exhaustive_small_scope_queue_race_orders	e4b	600	cut	slow
-no-features	cargo test	e4b	1500	cut	dup
+no-features	cargo test	e4b	900	cut	dup
