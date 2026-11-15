@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 # ci/test: runs exactly the suites admitted in ci/suites.tsv, nothing else.
-# A row runs when its admitted column is "yes" or "quarantine" (a flaky test, with one retry
-# in its own command and an owner); "cut" rows are kept for the record and for hand runs.
+# A row runs when its admitted column is "yes" or "quarantine <fix-by date>" (a flaky test,
+# with one retry in its own command and an owner); past its fix-by date a quarantine row
+# fails until the test is fixed or the row is cut. "cut" rows are kept for the record and
+# for hand runs. The admitted budgets must fit the test job's timeout-minutes in main.yml.
 # A failing suite is recorded and the next suite still runs: every suite runs, and ci/test
 # fails at the end, naming every failed suite.
 # FLOW_BASE (last tested commit) is passed by the main loop; unused for now.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+
+# main.yml: jobs.test.timeout-minutes 30
+job_s=1800
+today=$(date -u +%F)
+
+total=0
+while IFS=$'\t' read -r name cmd owner budget admitted guards; do
+  case "${admitted}" in yes | quarantine\ *) total=$((total + budget)) ;; esac
+done < ci/suites.tsv
+if [ "${total}" -gt "${job_s}" ]; then
+  echo "admitted budgets sum to ${total}s, over the test job's ${job_s}s: lower them or raise both" >&2
+  exit 1
+fi
 
 n=0
 failed=()
@@ -14,7 +29,22 @@ while IFS=$'\t' read -r name cmd owner budget admitted guards; do
   [ -z "${name}" ] && continue
   [ "${name}" = "name" ] && continue
   case "${admitted}" in
-    yes | quarantine) ;;
+    yes) ;;
+    quarantine\ ????-??-??)
+      fix_by="${admitted#quarantine }"
+      if [[ "${today}" > "${fix_by}" ]]; then
+        n=$((n + 1))
+        echo "suite ${name}: FAILED, quarantine ended ${fix_by}: fix the test or cut the row (owner ${owner})"
+        failed+=("${name}")
+        continue
+      fi
+      ;;
+    quarantine*)
+      n=$((n + 1))
+      echo "suite ${name}: FAILED, a quarantine row needs a fix-by date: quarantine YYYY-MM-DD (owner ${owner})"
+      failed+=("${name}")
+      continue
+      ;;
     *)
       echo "suite ${name}: ${admitted} (${guards}), not run"
       continue

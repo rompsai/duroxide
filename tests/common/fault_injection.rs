@@ -589,6 +589,7 @@ pub struct FailingProvider {
     fail_next_ack_orchestration_item: AtomicBool,
     fail_next_fetch_orchestration_item: AtomicBool,
     fail_next_fetch_work_item: AtomicBool,
+    fail_next_renew_work_item_lock: AtomicBool,
     /// If true, allow failure event commits to succeed even when failing acks
     allow_failure_commits: AtomicBool,
     /// If true, do the actual ack before returning error (for testing post-ack failures)
@@ -603,6 +604,7 @@ impl FailingProvider {
             fail_next_ack_orchestration_item: AtomicBool::new(false),
             fail_next_fetch_orchestration_item: AtomicBool::new(false),
             fail_next_fetch_work_item: AtomicBool::new(false),
+            fail_next_renew_work_item_lock: AtomicBool::new(false),
             allow_failure_commits: AtomicBool::new(false),
             ack_then_fail: AtomicBool::new(false),
         }
@@ -622,6 +624,12 @@ impl FailingProvider {
 
     pub fn fail_next_fetch_work_item(&self) {
         self.fail_next_fetch_work_item.store(true, Ordering::SeqCst);
+    }
+
+    /// The next activity lock renewal fails with a retryable error while the
+    /// lock itself stays valid: a transient provider error, not a cancellation.
+    pub fn fail_next_renew_work_item_lock(&self) {
+        self.fail_next_renew_work_item_lock.store(true, Ordering::SeqCst);
     }
 
     /// When set, failure event commits (OrchestrationFailed) will succeed
@@ -753,7 +761,14 @@ impl Provider for FailingProvider {
     }
 
     async fn renew_work_item_lock(&self, token: &str, extension: Duration) -> Result<(), ProviderError> {
-        self.inner.renew_work_item_lock(token, extension).await
+        if self.fail_next_renew_work_item_lock.swap(false, Ordering::SeqCst) {
+            Err(ProviderError::retryable(
+                "renew_work_item_lock",
+                "simulated transient infrastructure failure",
+            ))
+        } else {
+            self.inner.renew_work_item_lock(token, extension).await
+        }
     }
 
     async fn abandon_work_item(

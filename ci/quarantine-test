@@ -10,5 +10,4 @@ if [ "${found}" != 1 ]; then
   echo "quarantine: ${bin}::${name} matches ${found} tests, not 1 (renamed or deleted? fix ci/suites.tsv)" >&2
   exit 1
 fi
-cargo test --all-features --test "${bin}" -- --exact "${name}" \
-  || cargo test --all-features --test "${bin}" -- --exact "${name}"
+exec ci/retry-once cargo test --all-features --test "${bin}" -- --exact "${name}"
