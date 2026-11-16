@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ci/retry-once <command...>: runs the command, and once more if it fails. A pass on the retry
+# prints a FLAKY line, so a flaky test shows in the log even when the suite passes.
+set -uo pipefail
+"$@" && exit 0
+echo "FLAKY: '$*' failed once; retrying" >&2
+"$@" || exit
+echo "FLAKY: '$*' passed on the retry" >&2

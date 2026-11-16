@@ -6,9 +6,13 @@
 #![allow(clippy::expect_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 mod common;
+use common::fault_injection::FailingProvider;
+use duroxide::providers::Provider;
+use duroxide::providers::sqlite::SqliteProvider;
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{Client, OrchestrationContext, OrchestrationRegistry};
@@ -161,7 +165,12 @@ async fn very_short_lock_timeout_works() {
 
 /// Test: Long-running activity completes successfully with lock renewal
 /// This test verifies that activities running longer than the lock timeout
-/// complete successfully due to automatic lock renewal.
+/// complete successfully due to automatic lock renewal, and run once: the
+/// renewals kept the lock, so the work was never redelivered.
+///
+/// The margins hold under the full parallel suite: a 6 second lock renews
+/// every 3 seconds, so a renewal may run up to 3 seconds late, and the wait
+/// leaves room for a slow runner.
 #[tokio::test]
 async fn long_running_activity_with_lock_renewal() {
     let (store, _temp_dir) = common::create_sqlite_store_disk().await;
@@ -171,23 +180,25 @@ async fn long_running_activity_with_lock_renewal() {
         Ok(result)
     };
 
-    // Activity that takes 6 seconds
+    // Activity that takes 8 seconds, longer than the 6 second lock
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_in_activity = runs.clone();
     let acts = ActivityRegistry::builder()
-        .register(
-            "LongActivity",
-            |_ctx: duroxide::ActivityContext, input: String| async move {
-                tokio::time::sleep(Duration::from_secs(6)).await;
+        .register("LongActivity", move |_ctx: duroxide::ActivityContext, input: String| {
+            let runs = runs_in_activity.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(8)).await;
                 Ok(format!("completed: {input}"))
-            },
-        )
+            }
+        })
         .build();
 
     let reg = OrchestrationRegistry::builder().register("TestOrch", orch).build();
 
-    // Use 3 second worker lock timeout with 1 second buffer
-    // Lock should be renewed at 2s, 4s (ensuring activity completes)
+    // A lock under 15 seconds renews at half its length: at 3s and 6s here
     let options = RuntimeOptions {
-        worker_lock_timeout: Duration::from_secs(3),
+        worker_lock_timeout: Duration::from_secs(6),
         worker_lock_renewal_buffer: Duration::from_secs(1),
         ..Default::default()
     };
@@ -200,7 +211,7 @@ async fn long_running_activity_with_lock_renewal() {
 
     // Wait for orchestration to complete (should succeed despite activity > initial lock timeout)
     let status = client
-        .wait_for_orchestration(inst, Duration::from_secs(10))
+        .wait_for_orchestration(inst, Duration::from_secs(30))
         .await
         .unwrap();
 
@@ -213,6 +224,85 @@ async fn long_running_activity_with_lock_renewal() {
         }
         _ => panic!("Unexpected orchestration status"),
     }
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the renewed lock was lost and the activity ran again"
+    );
+
+    rt.shutdown(None).await;
+}
+
+/// Test: a failed activity lock renewal redelivers the activity
+/// A renewal can fail on a transient provider error while the orchestration
+/// is live. The runtime cancels the activity, and the work item must go back
+/// for redelivery: acknowledging it without a completion would leave the
+/// orchestration waiting forever (microsoft/duroxide#56).
+#[tokio::test]
+async fn failed_lock_renewal_redelivers_activity() {
+    let sqlite = Arc::new(SqliteProvider::new_in_memory().await.unwrap());
+    let failing = Arc::new(FailingProvider::new(sqlite));
+    let store: Arc<dyn Provider> = failing.clone();
+
+    let orch = |ctx: OrchestrationContext, _input: String| async move {
+        let result = ctx.schedule_activity("SlowFirstTime", "data").await?;
+        Ok(result)
+    };
+
+    // The first run outlasts the first renewal (at 1s) and ignores its
+    // cancellation, so the runtime aborts it after the grace period. The
+    // redelivered run returns at once.
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_in_activity = runs.clone();
+    let acts = ActivityRegistry::builder()
+        .register(
+            "SlowFirstTime",
+            move |_ctx: duroxide::ActivityContext, input: String| {
+                let runs = runs_in_activity.clone();
+                async move {
+                    if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    Ok(format!("completed: {input}"))
+                }
+            },
+        )
+        .build();
+
+    let reg = OrchestrationRegistry::builder().register("TestOrch", orch).build();
+
+    let options = RuntimeOptions {
+        worker_lock_timeout: Duration::from_secs(2),
+        activity_cancellation_grace_period: Duration::from_millis(500),
+        ..Default::default()
+    };
+
+    failing.fail_next_renew_work_item_lock();
+    let rt = runtime::Runtime::start_with_options(store.clone(), acts, reg, options).await;
+    let client = Client::new(store.clone());
+
+    let inst = "inst-failed-renewal-redelivers";
+    client.start_orchestration(inst, "TestOrch", "").await.unwrap();
+
+    let status = client
+        .wait_for_orchestration(inst, Duration::from_secs(20))
+        .await
+        .expect("the activity was not redelivered after the failed renewal");
+
+    match status {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "completed: data");
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!("Orchestration failed: {}", details.display_message());
+        }
+        other => panic!("Unexpected orchestration status: {other:?}"),
+    }
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "the activity should run once more after the failed renewal"
+    );
 
     rt.shutdown(None).await;
 }
