@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ci/build: one of the five flow scripts (check, test, build, deploy, smoke).
-# Wraps today's commands; source: .github/workflows/CI.yml:21 (cargo build --all-features).
+# Run by the build job of .github/workflows/main.yml after ci/test passes on the default branch.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
