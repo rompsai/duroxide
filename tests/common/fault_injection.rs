@@ -589,7 +589,9 @@ pub struct FailingProvider {
     fail_next_ack_orchestration_item: AtomicBool,
     fail_next_fetch_orchestration_item: AtomicBool,
     fail_next_fetch_work_item: AtomicBool,
-    fail_next_renew_work_item_lock: AtomicBool,
+    fail_next_renew_work_item_lock: std::sync::Mutex<Option<ProviderError>>,
+    /// Activity lock renewals that reached the inner provider and succeeded
+    renewed_work_item_locks: tokio::sync::watch::Sender<u32>,
     /// If true, allow failure event commits to succeed even when failing acks
     allow_failure_commits: AtomicBool,
     /// If true, do the actual ack before returning error (for testing post-ack failures)
@@ -607,7 +609,8 @@ impl FailingProvider {
             fail_next_ack_orchestration_item: AtomicBool::new(false),
             fail_next_fetch_orchestration_item: AtomicBool::new(false),
             fail_next_fetch_work_item: AtomicBool::new(false),
-            fail_next_renew_work_item_lock: AtomicBool::new(false),
+            fail_next_renew_work_item_lock: Default::default(),
+            renewed_work_item_locks: tokio::sync::watch::Sender::new(0),
             allow_failure_commits: AtomicBool::new(false),
             ack_then_fail: AtomicBool::new(false),
             orchestration_fetches: Default::default(),
@@ -641,10 +644,19 @@ impl FailingProvider {
         self.fail_next_fetch_work_item.store(true, Ordering::SeqCst);
     }
 
-    /// The next activity lock renewal fails with a retryable error while the
-    /// lock itself stays valid: a transient provider error, not a cancellation.
-    pub fn fail_next_renew_work_item_lock(&self) {
-        self.fail_next_renew_work_item_lock.store(true, Ordering::SeqCst);
+    /// The next activity lock renewal returns `error` while the lock itself
+    /// stays valid: a provider error, not a cancellation.
+    pub fn fail_next_renew_work_item_lock(&self, error: ProviderError) {
+        *self.fail_next_renew_work_item_lock.lock().expect("renewal fault lock") = Some(error);
+    }
+
+    /// Waits until `count` activity lock renewals have succeeded.
+    pub async fn wait_for_renewed_work_item_locks(&self, count: u32) {
+        let mut renewed = self.renewed_work_item_locks.subscribe();
+        renewed
+            .wait_for(|renewed| *renewed >= count)
+            .await
+            .expect("renewal counter dropped");
     }
 
     /// When set, failure event commits (OrchestrationFailed) will succeed
@@ -778,14 +790,17 @@ impl Provider for FailingProvider {
     }
 
     async fn renew_work_item_lock(&self, token: &str, extension: Duration) -> Result<(), ProviderError> {
-        if self.fail_next_renew_work_item_lock.swap(false, Ordering::SeqCst) {
-            Err(ProviderError::retryable(
-                "renew_work_item_lock",
-                "simulated transient infrastructure failure",
-            ))
-        } else {
-            self.inner.renew_work_item_lock(token, extension).await
+        let injected = self
+            .fail_next_renew_work_item_lock
+            .lock()
+            .expect("renewal fault lock")
+            .take();
+        if let Some(error) = injected {
+            return Err(error);
         }
+        self.inner.renew_work_item_lock(token, extension).await?;
+        self.renewed_work_item_locks.send_modify(|renewed| *renewed += 1);
+        Ok(())
     }
 
     async fn abandon_work_item(

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 mod common;
 use common::fault_injection::FailingProvider;
-use duroxide::providers::Provider;
 use duroxide::providers::sqlite::SqliteProvider;
+use duroxide::providers::{Provider, ProviderError};
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{Client, OrchestrationContext, OrchestrationRegistry};
@@ -233,78 +233,218 @@ async fn long_running_activity_with_lock_renewal() {
     rt.shutdown(None).await;
 }
 
+/// Runtime options for the renewal-failure tests: the first renewal runs at
+/// 1s (a lock of 15s or more renews at `timeout - buffer`), and the lock
+/// itself lasts 60s, so lock expiry can never redeliver the activity within
+/// a test's 20s wait. Only the runtime's own handling of the failed renewal
+/// can.
+fn renewal_failure_options() -> RuntimeOptions {
+    RuntimeOptions {
+        worker_lock_timeout: Duration::from_secs(60),
+        worker_lock_renewal_buffer: Duration::from_secs(59),
+        activity_cancellation_grace_period: Duration::from_millis(500),
+        ..Default::default()
+    }
+}
+
+/// Starts `SingleActivityOrch`, which schedules `Activity` once, and waits
+/// for it to complete; returns the output.
+async fn run_single_activity_orchestration(
+    store: Arc<dyn Provider>,
+    acts: ActivityRegistry,
+    options: RuntimeOptions,
+    instance: &str,
+) -> String {
+    let orch = |ctx: OrchestrationContext, _input: String| async move {
+        let result = ctx.schedule_activity("Activity", "data").await?;
+        Ok(result)
+    };
+    let reg = OrchestrationRegistry::builder()
+        .register("SingleActivityOrch", orch)
+        .build();
+    let rt = runtime::Runtime::start_with_options(store.clone(), acts, reg, options).await;
+    let client = Client::new(store.clone());
+
+    client
+        .start_orchestration(instance, "SingleActivityOrch", "")
+        .await
+        .unwrap();
+    let status = client
+        .wait_for_orchestration(instance, Duration::from_secs(20))
+        .await
+        .expect("the orchestration did not complete");
+    rt.shutdown(None).await;
+
+    match status {
+        runtime::OrchestrationStatus::Completed { output, .. } => output,
+        other => panic!("Unexpected orchestration status: {other:?}"),
+    }
+}
+
 /// Test: a failed activity lock renewal redelivers the activity
-/// A renewal can fail on a transient provider error while the orchestration
-/// is live. The runtime cancels the activity, and the work item must go back
-/// for redelivery: acknowledging it without a completion would leave the
-/// orchestration waiting forever (microsoft/duroxide#56).
+/// A renewal can fail with a permanent provider error while the
+/// orchestration and the lock are live. The runtime cancels the activity, and
+/// when the handler does not finish within the grace period the work item
+/// must go back for redelivery: acknowledging it without a completion would
+/// leave the orchestration waiting forever (microsoft/duroxide#56).
 #[tokio::test]
 async fn failed_lock_renewal_redelivers_activity() {
     let sqlite = Arc::new(SqliteProvider::new_in_memory().await.unwrap());
     let failing = Arc::new(FailingProvider::new(sqlite));
-    let store: Arc<dyn Provider> = failing.clone();
+    failing.fail_next_renew_work_item_lock(ProviderError::permanent(
+        "renew_work_item_lock",
+        "simulated permanent provider error",
+    ));
 
-    let orch = |ctx: OrchestrationContext, _input: String| async move {
-        let result = ctx.schedule_activity("SlowFirstTime", "data").await?;
-        Ok(result)
-    };
-
-    // The first run outlasts the first renewal (at 1s) and ignores its
-    // cancellation, so the runtime aborts it after the grace period. The
-    // redelivered run returns at once.
+    // The first run ignores its cancellation, so the runtime aborts it after
+    // the grace period. The redelivered run returns at once.
     let runs = Arc::new(AtomicU32::new(0));
     let runs_in_activity = runs.clone();
     let acts = ActivityRegistry::builder()
-        .register(
-            "SlowFirstTime",
-            move |_ctx: duroxide::ActivityContext, input: String| {
-                let runs = runs_in_activity.clone();
-                async move {
-                    if runs.fetch_add(1, Ordering::SeqCst) == 0 {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                    Ok(format!("completed: {input}"))
+        .register("Activity", move |_ctx: duroxide::ActivityContext, input: String| {
+            let runs = runs_in_activity.clone();
+            async move {
+                if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    std::future::pending::<()>().await;
                 }
-            },
-        )
+                Ok(format!("completed: {input}"))
+            }
+        })
         .build();
 
-    let reg = OrchestrationRegistry::builder().register("TestOrch", orch).build();
+    let output = run_single_activity_orchestration(
+        failing,
+        acts,
+        renewal_failure_options(),
+        "inst-failed-renewal-redelivers",
+    )
+    .await;
 
-    let options = RuntimeOptions {
-        worker_lock_timeout: Duration::from_secs(2),
-        activity_cancellation_grace_period: Duration::from_millis(500),
-        ..Default::default()
-    };
-
-    failing.fail_next_renew_work_item_lock();
-    let rt = runtime::Runtime::start_with_options(store.clone(), acts, reg, options).await;
-    let client = Client::new(store.clone());
-
-    let inst = "inst-failed-renewal-redelivers";
-    client.start_orchestration(inst, "TestOrch", "").await.unwrap();
-
-    let status = client
-        .wait_for_orchestration(inst, Duration::from_secs(20))
-        .await
-        .expect("the activity was not redelivered after the failed renewal");
-
-    match status {
-        runtime::OrchestrationStatus::Completed { output, .. } => {
-            assert_eq!(output, "completed: data");
-        }
-        runtime::OrchestrationStatus::Failed { details, .. } => {
-            panic!("Orchestration failed: {}", details.display_message());
-        }
-        other => panic!("Unexpected orchestration status: {other:?}"),
-    }
+    assert_eq!(output, "completed: data");
     assert_eq!(
         runs.load(Ordering::SeqCst),
         2,
         "the activity should run once more after the failed renewal"
     );
+}
 
-    rt.shutdown(None).await;
+/// Test: a result returned within the grace period after a failed renewal is
+/// delivered, and the activity runs once.
+#[tokio::test]
+async fn activity_result_within_grace_period_is_delivered_after_failed_renewal() {
+    let sqlite = Arc::new(SqliteProvider::new_in_memory().await.unwrap());
+    let failing = Arc::new(FailingProvider::new(sqlite));
+    failing.fail_next_renew_work_item_lock(ProviderError::permanent(
+        "renew_work_item_lock",
+        "simulated permanent provider error",
+    ));
+
+    // The first run returns as soon as it is cancelled, inside the grace period.
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_in_activity = runs.clone();
+    let acts = ActivityRegistry::builder()
+        .register("Activity", move |ctx: duroxide::ActivityContext, input: String| {
+            let runs = runs_in_activity.clone();
+            async move {
+                if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ctx.cancelled().await;
+                }
+                Ok(format!("completed: {input}"))
+            }
+        })
+        .build();
+
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-grace-result-delivered")
+            .await;
+
+    assert_eq!(output, "completed: data");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the result returned within the grace period was dropped and the activity ran again"
+    );
+}
+
+/// Test: an error returned within the grace period after a failed renewal is
+/// not delivered: it may be the handler's answer to the runtime's own
+/// cancellation, so the work item is redelivered.
+#[tokio::test]
+async fn activity_error_within_grace_period_redelivers_after_failed_renewal() {
+    let sqlite = Arc::new(SqliteProvider::new_in_memory().await.unwrap());
+    let failing = Arc::new(FailingProvider::new(sqlite));
+    failing.fail_next_renew_work_item_lock(ProviderError::permanent(
+        "renew_work_item_lock",
+        "simulated permanent provider error",
+    ));
+
+    // The first run answers its cancellation with an error, as the
+    // ActivityContext docs show; the redelivered run succeeds.
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_in_activity = runs.clone();
+    let acts = ActivityRegistry::builder()
+        .register("Activity", move |ctx: duroxide::ActivityContext, input: String| {
+            let runs = runs_in_activity.clone();
+            async move {
+                if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ctx.cancelled().await;
+                    return Err("Cancelled".to_string());
+                }
+                Ok(format!("completed: {input}"))
+            }
+        })
+        .build();
+
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-grace-error-redelivered")
+            .await;
+
+    assert_eq!(output, "completed: data");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "the activity should run once more after the cancelled run's error"
+    );
+}
+
+/// Test: a transient (retryable) renewal error does not cancel the activity;
+/// the runtime keeps renewing and the activity runs once.
+#[tokio::test]
+async fn transient_lock_renewal_error_keeps_activity_running() {
+    let sqlite = Arc::new(SqliteProvider::new_in_memory().await.unwrap());
+    let failing = Arc::new(FailingProvider::new(sqlite));
+    failing.fail_next_renew_work_item_lock(ProviderError::retryable(
+        "renew_work_item_lock",
+        "simulated transient provider error",
+    ));
+
+    // Each run finishes only after a renewal succeeds. The first renewal
+    // fails, so the first run finishes only if renewal goes on after it.
+    let runs = Arc::new(AtomicU32::new(0));
+    let runs_in_activity = runs.clone();
+    let failing_in_activity = failing.clone();
+    let acts = ActivityRegistry::builder()
+        .register("Activity", move |_ctx: duroxide::ActivityContext, input: String| {
+            let runs = runs_in_activity.clone();
+            let failing = failing_in_activity.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                failing.wait_for_renewed_work_item_locks(1).await;
+                Ok(format!("completed: {input}"))
+            }
+        })
+        .build();
+
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-transient-renewal-error")
+            .await;
+
+    assert_eq!(output, "completed: data");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the transient renewal error cancelled the activity and it ran again"
+    );
 }
 
 /// Test: Activity completes before first renewal interval
