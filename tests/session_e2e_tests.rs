@@ -1314,11 +1314,13 @@ async fn test_session_cap_blocks_then_unblocks() {
 /// - Both workers serve work (non-session distributes freely, sessions pin)
 #[tokio::test]
 async fn test_multi_worker_complex_orchestration() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
 
-    // Track which worker handled each session (via activity closures)
-    let worker_a_count = Arc::new(AtomicUsize::new(0));
-    let worker_b_count = Arc::new(AtomicUsize::new(0));
+    // Inputs of the session activities that ran, on either worker. Activities are
+    // at-least-once: an ack that fails (the shared in-memory store can report "database is
+    // deadlocked" under contention) abandons the item and it runs again, so this is a set.
+    let session_inputs_run = Arc::new(Mutex::new(BTreeSet::new()));
 
     // Shared store (simulates PostgreSQL in production)
     let store: Arc<dyn duroxide::providers::Provider> = Arc::new(
@@ -1327,12 +1329,12 @@ async fn test_multi_worker_complex_orchestration() {
             .unwrap(),
     );
 
-    fn build_activities(counter: Arc<AtomicUsize>) -> ActivityRegistry {
+    fn build_activities(inputs_run: Arc<Mutex<BTreeSet<String>>>) -> ActivityRegistry {
         ActivityRegistry::builder()
             .register("SessionWork", move |ctx: ActivityContext, input: String| {
-                let c = counter.clone();
+                let inputs_run = inputs_run.clone();
                 async move {
-                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    inputs_run.lock().unwrap().insert(input.clone());
                     assert!(ctx.session_id().is_some(), "SessionWork must have a session_id");
                     // Simulate some work
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1391,7 +1393,7 @@ async fn test_multi_worker_complex_orchestration() {
     // Start two runtimes with different worker_node_ids
     let rt_a = runtime::Runtime::start_with_options(
         store.clone(),
-        build_activities(worker_a_count.clone()),
+        build_activities(session_inputs_run.clone()),
         build_orchestrations(),
         RuntimeOptions {
             worker_concurrency: 2,
@@ -1405,7 +1407,7 @@ async fn test_multi_worker_complex_orchestration() {
 
     let rt_b = runtime::Runtime::start_with_options(
         store.clone(),
-        build_activities(worker_b_count.clone()),
+        build_activities(session_inputs_run.clone()),
         build_orchestrations(),
         RuntimeOptions {
             worker_concurrency: 2,
@@ -1447,14 +1449,9 @@ async fn test_multi_worker_complex_orchestration() {
         other => panic!("Expected completed, got {:?}", other),
     }
 
-    // Both workers should have processed some work
-    let a = worker_a_count.load(Ordering::SeqCst);
-    let b = worker_b_count.load(Ordering::SeqCst);
-    assert_eq!(
-        a + b,
-        5,
-        "Total session activities should be 5 (3 + 2 from CAN), got A={a} B={b}"
-    );
+    // Every session activity ran: 3 before the continue-as-new and 2 after it.
+    let inputs_run: Vec<String> = session_inputs_run.lock().unwrap().iter().cloned().collect();
+    assert_eq!(inputs_run, ["a", "b", "c", "e", "f"]);
 
     rt_a.shutdown(None).await;
     rt_b.shutdown(None).await;

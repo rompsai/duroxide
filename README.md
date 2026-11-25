@@ -265,4 +265,4 @@ This project may contain trademarks or logos for projects, products, or services
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-PRs need only the check job; tests run on the default branch, `romps/0.1.32-renewal`, after merge (TARGET-FLOW-CONTRACT).
+PRs need only the check job; tests run on the default branch, `romps/0.1.32-renewal`, after merge (see [CONTRIBUTING.md](CONTRIBUTING.md#ci)).
