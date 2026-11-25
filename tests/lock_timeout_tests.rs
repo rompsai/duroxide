@@ -11,8 +11,8 @@ use std::time::Duration;
 
 mod common;
 use common::fault_injection::FailingProvider;
-use duroxide::providers::{Provider, ProviderError};
 use duroxide::providers::sqlite::SqliteProvider;
+use duroxide::providers::{Provider, ProviderError};
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{Client, OrchestrationContext, OrchestrationRegistry};
@@ -354,13 +354,9 @@ async fn activity_result_within_grace_period_is_delivered_after_failed_renewal()
         })
         .build();
 
-    let output = run_single_activity_orchestration(
-        failing,
-        acts,
-        renewal_failure_options(),
-        "inst-grace-result-delivered",
-    )
-    .await;
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-grace-result-delivered")
+            .await;
 
     assert_eq!(output, "completed: data");
     assert_eq!(
@@ -399,13 +395,9 @@ async fn activity_error_within_grace_period_redelivers_after_failed_renewal() {
         })
         .build();
 
-    let output = run_single_activity_orchestration(
-        failing,
-        acts,
-        renewal_failure_options(),
-        "inst-grace-error-redelivered",
-    )
-    .await;
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-grace-error-redelivered")
+            .await;
 
     assert_eq!(output, "completed: data");
     assert_eq!(
@@ -443,13 +435,9 @@ async fn transient_lock_renewal_error_keeps_activity_running() {
         })
         .build();
 
-    let output = run_single_activity_orchestration(
-        failing,
-        acts,
-        renewal_failure_options(),
-        "inst-transient-renewal-error",
-    )
-    .await;
+    let output =
+        run_single_activity_orchestration(failing, acts, renewal_failure_options(), "inst-transient-renewal-error")
+            .await;
 
     assert_eq!(output, "completed: data");
     assert_eq!(

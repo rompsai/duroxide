@@ -790,7 +790,11 @@ impl Provider for FailingProvider {
     }
 
     async fn renew_work_item_lock(&self, token: &str, extension: Duration) -> Result<(), ProviderError> {
-        let injected = self.fail_next_renew_work_item_lock.lock().expect("renewal fault lock").take();
+        let injected = self
+            .fail_next_renew_work_item_lock
+            .lock()
+            .expect("renewal fault lock")
+            .take();
         if let Some(error) = injected {
             return Err(error);
         }
