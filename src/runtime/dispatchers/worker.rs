@@ -611,20 +611,29 @@ async fn run_activity_with_cancellation(
             );
 
             // Wait for activity to finish within grace period, or abort it
-            let finished_in_time = tokio::time::timeout(grace, &mut activity_handle).await.is_ok();
-            if !finished_in_time {
-                tracing::debug!(
-                    target: "duroxide::runtime",
-                    instance_id = %ctx.instance,
-                    activity_name = %ctx.activity_name,
-                    activity_id = %ctx.activity_id,
-                    "Activity did not finish within grace period; aborting"
-                );
-                activity_handle.abort();
-                let _ = activity_handle.await;
+            match tokio::time::timeout(grace, &mut activity_handle).await {
+                // A success is work done: deliver it, as running it again would run
+                // it twice. If the lock is really lost the provider refuses the ack.
+                Ok(Ok(Ok(result))) => return handle_activity_success(rt, ctx, result, start_time).await,
+                // The runtime itself cancelled this run, so an error is most likely
+                // the handler's answer to that cancel (such as `Err("Cancelled")`),
+                // not a real failure. Delivering it would turn a failed renewal into
+                // a failed activity; release the work for redelivery instead.
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        target: "duroxide::runtime",
+                        instance_id = %ctx.instance,
+                        activity_name = %ctx.activity_name,
+                        activity_id = %ctx.activity_id,
+                        "Activity did not finish within grace period; aborting"
+                    );
+                    activity_handle.abort();
+                    let _ = activity_handle.await;
+                }
             }
 
-            // A failed renewal may be a transient provider error while the
+            // A failed renewal may be a permanent provider error while the
             // orchestration and lease are still live. Do not ack without a
             // completion: that would leave the orchestration waiting forever.
             // The handler has finished or been aborted and joined, so release
@@ -829,6 +838,12 @@ fn calculate_renewal_interval(lock_timeout: Duration, buffer: Duration) -> Durat
     }
 }
 
+/// Delay before retrying a lock renewal after `retryable_errors` retryable
+/// failures in a row: 200ms, doubling, at most 1s.
+fn renewal_retry_backoff(retryable_errors: u32) -> Duration {
+    Duration::from_millis(100 << retryable_errors.min(4)).min(Duration::from_secs(1))
+}
+
 /// Spawn a background task to manage an in-flight activity.
 ///
 /// Handles: lock renewal, cancellation detection, and cancellation signaling.
@@ -865,9 +880,18 @@ fn spawn_activity_manager(
         let mut interval = tokio::time::interval(renewal_interval);
         interval.tick().await; // Skip first immediate tick
 
-        loop {
-            interval.tick().await;
+        // The lock was taken at fetch, just before this task started.
+        let mut lock_expires_at = tokio::time::Instant::now() + lock_timeout;
+        let mut retryable_errors: u32 = 0;
 
+        loop {
+            if retryable_errors == 0 {
+                interval.tick().await;
+            } else {
+                tokio::time::sleep(renewal_retry_backoff(retryable_errors)).await;
+            }
+
+            let attempt_started_at = tokio::time::Instant::now();
             match store.renew_work_item_lock(&token, lock_timeout).await {
                 Ok(()) => {
                     // Lock renewed successfully - orchestration is still running
@@ -877,9 +901,27 @@ fn spawn_activity_manager(
                         extend_secs = %lock_timeout.as_secs(),
                         "Work item lock renewed"
                     );
+                    lock_expires_at = attempt_started_at + lock_timeout;
+                    if retryable_errors > 0 {
+                        retryable_errors = 0;
+                        interval.reset();
+                    }
+                }
+                // A transient error says nothing about the lock: keep renewing
+                // while the lock is still held, so the handler keeps its lease.
+                Err(e) if e.is_retryable() && tokio::time::Instant::now() < lock_expires_at => {
+                    retryable_errors += 1;
+                    tracing::warn!(
+                        target: "duroxide::runtime::worker",
+                        lock_token = %token,
+                        error = %e,
+                        attempt = %retryable_errors,
+                        "Lock renewal failed with a retryable error, retrying before the lock expires"
+                    );
                 }
                 Err(e) => {
-                    // Lock renewal failed - activity was cancelled (lock stolen) or lock expired
+                    // Lock renewal failed for good - activity was cancelled (lock stolen),
+                    // the lock expired, or the provider reported a permanent error
                     tracing::info!(
                         target: "duroxide::runtime::worker",
                         lock_token = %token,
