@@ -59,10 +59,10 @@ For broader runtime changes, also run the comprehensive two-pass suite:
 
 Pull requests run one required check, `check` (`ci/check`: a secret scan of the
 pull request's own commits, then `cargo build --all-features`). Run it locally
-with `ci/check`. After a merge, the default branch runs `ci/test` (the suites
-listed in `ci/suites.tsv`, none yet) and then `ci/build`. The tests above are
-not run on pull requests, so run the ones relevant to your change before
-opening one.
+with `ci/check`. After a merge, the default branch, `romps/0.1.32-renewal`,
+runs `ci/test` (the suites admitted in `ci/suites.tsv`) and then `ci/build`.
+The tests above are not run on pull requests, so run the ones relevant to your
+change before opening one.
 
 ## Filing pull requests
 
