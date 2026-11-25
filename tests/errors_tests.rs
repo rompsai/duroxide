@@ -9,7 +9,7 @@ use duroxide::providers::Provider;
 mod common;
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self};
-use duroxide::{ActivityContext, Either2, OrchestrationContext, OrchestrationRegistry};
+use duroxide::{ActivityContext, Either2, EventKind, OrchestrationContext, OrchestrationRegistry};
 use std::sync::Arc as StdArc;
 use std::time::Duration;
 
@@ -357,8 +357,8 @@ async fn event_before_subscription_after_start_is_ignored() {
     let activity_registry = ActivityRegistry::builder().build();
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
         info!("Orchestration started");
-        // Delay before subscribing to simulate missing subscription window
-        ctx.schedule_timer(Duration::from_millis(10)).await;
+        // Hold off subscribing to "Evt" until the test says "Go", after "Evt" is in history.
+        ctx.schedule_wait("Go").await;
         info!("Subscribing to event");
         // Subscribe, then wait for event with timeout
         let ev = ctx.schedule_wait("Evt");
@@ -381,19 +381,28 @@ async fn event_before_subscription_after_start_is_ignored() {
 
     let rt = runtime::Runtime::start_with_store(store.clone(), activity_registry, orchestration_registry).await;
     let client = duroxide::Client::new(store.clone());
-    // Orchestration: delay, then subscribe
     let instance = "inst-pre-sub-drop-1";
-    let client_c1 = duroxide::Client::new(store.clone());
-    tokio::spawn(async move {
-        info!("Raising early event");
-        // Raise early before subscription exists (timer delays subscription)
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        let _ = client_c1.raise_event(instance, "Evt", "early").await;
-    });
     client
         .start_orchestration(instance, "PreSubscriptionTest", "")
         .await
         .unwrap();
+
+    // The instance has started and is waiting on "Go", so it has no "Evt" subscription yet.
+    assert!(common::wait_for_subscription(store.clone(), instance, "Go", 5_000).await);
+    info!("Raising early event");
+    client.raise_event(instance, "Evt", "early").await.unwrap();
+    assert!(
+        common::wait_for_history(
+            store.clone(),
+            instance,
+            |h| h
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::ExternalEvent { name, .. } if name == "Evt")),
+            5_000
+        )
+        .await
+    );
+    client.raise_event(instance, "Go", "").await.unwrap();
 
     match client
         .wait_for_orchestration(instance, std::time::Duration::from_secs(5))

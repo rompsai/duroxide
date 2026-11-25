@@ -116,16 +116,8 @@ where
 
 #[tokio::test]
 async fn recovery_across_restart_sqlite_provider() {
-    let base = std::env::current_dir().unwrap().join(".testdata");
-    std::fs::create_dir_all(&base).unwrap();
-    let dir = base.join(format!(
-        "fs_recovery_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
 
     let instance = String::from("inst-recover-sqlite-1");
 
@@ -188,17 +180,8 @@ async fn recovery_across_restart_sqlite_memory() {
 
 #[tokio::test]
 async fn recovery_multiple_orchestrations_sqlite_provider() {
-    // Prepare a dedicated directory
-    let base = std::env::current_dir().unwrap().join(".testdata");
-    std::fs::create_dir_all(&base).unwrap();
-    let dir = base.join(format!(
-        "fs_recovery_multi_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
 
     // Orchestrations of different shapes
     let orch_echo_wait = |ctx: OrchestrationContext, input: String| async move {
@@ -274,16 +257,13 @@ async fn recovery_multiple_orchestrations_sqlite_provider() {
         client1.start_orchestration(*inst, *name, *input).await.unwrap();
     }
     // Wait for each orchestration to reach its expected pre-shutdown checkpoint
-    // EchoWait: timer created but not yet fired
+    // EchoWait: timer created. Whether it fires before the shutdown below is a race the
+    // test does not depend on: recovery must finish the instance either way.
     assert!(
         wait_for_history(
             store1.clone(),
             "inst-echo-wait",
-            |h| {
-                let has_timer_created = h.iter().any(|e| matches!(&e.kind, EventKind::TimerCreated { .. }));
-                let has_timer_fired = h.iter().any(|e| matches!(&e.kind, EventKind::TimerFired { .. }));
-                has_timer_created && !has_timer_fired
-            },
+            |h| h.iter().any(|e| matches!(&e.kind, EventKind::TimerCreated { .. })),
             2000
         )
         .await

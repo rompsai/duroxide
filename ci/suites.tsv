@@ -1,7 +1,4 @@
 name	command	owner	budget_s	admitted	guards
-tests	ci/retry-once cargo test --all-features -- --skip event_before_subscription_after_start_is_ignored --skip recovery_multiple_orchestrations_sqlite_provider --skip test_multi_worker_complex_orchestration --skip exhaustive_small_scope_queue_race_orders	e4b	900	yes	behavior
-flaky-event-before-subscription-after-start-is	ci/quarantine-test errors_tests event_before_subscription_after_start_is_ignored	e4b	120	quarantine 2026-11-29	flaky
-flaky-recovery-multiple-orchestrations-sqlite-	ci/quarantine-test recovery_tests recovery_multiple_orchestrations_sqlite_provider	e4b	120	quarantine 2026-11-29	flaky
-flaky-test-multi-worker-complex-orchestration	ci/quarantine-test session_e2e_tests test_multi_worker_complex_orchestration	e4b	120	quarantine 2026-11-29	flaky
+tests	ci/retry-once cargo test --all-features -- --skip exhaustive_small_scope_queue_race_orders	e4b	900	yes	behavior
+no-features	cargo test -- --skip exhaustive_small_scope_queue_race_orders	e4b	900	yes	behavior
 exhaustive-queue-race	cargo test --all-features --test cancellation_corner_cases -- --exact exhaustive_small_scope_queue_race_orders	e4b	600	cut	slow
-no-features	cargo test	e4b	900	cut	dup
