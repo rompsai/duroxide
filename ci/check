@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ci/check: one of the five flow scripts (check, test, build, deploy, smoke).
-# Wraps today's commands; source: .github/workflows/CI.yml:21 (cargo build --all-features).
+# Run on every pull request by .github/workflows/check.yml, its one required check.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-# Secret scan of this PR's own commits (seconds). The daily 04:00 SGT run scans full history.
+# Secret scan of this PR's own commits (seconds). It is this repository's only secret scan:
+# nothing here scans full history.
 # No main here: the fallback (local runs) is the default branch, origin/HEAD.
 base="${FLOW_BASE:-$(git merge-base origin/HEAD HEAD)}"
 gitleaks git . --redact --no-banner --exit-code 1 --log-opts="${base}..HEAD"
